@@ -11,15 +11,16 @@
 #include "mmu.h"
 #include "loader.h"
 #include "ufs.h"
+#include "fdt.h"
 
 #define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
 #define RESTART_BOOTLOADER	0x77665500U
 #define PSHOLD			0x0c264000UL
 
-#define GICD_BASE		0x17a00000UL
-#define GICR_BASE		0x17a60000UL
-#define GICR_SIZE		0x100000UL
-#define GICR_PE_SIZE		0x20000UL
+#define GICD_BASE_DEFAULT	0x17a00000UL
+#define GICR_BASE_DEFAULT	0x17a60000UL
+#define GICR_SIZE_DEFAULT	0x100000UL
+#define GICR_PE_SIZE_DEFAULT	0x20000UL
 #define GICR_TYPER		0x08
 #define GICR_WAKER		0x14
 #define GICR_SGI		0x10000
@@ -64,6 +65,16 @@ static volatile uint64_t sec_probe[4];	/* CPU1 redistributor write test */
 static volatile uint32_t irq_count, irq_other, irq_last;
 static volatile int irq_src;
 
+/* GIC geometry, defaulting to the sweet (SM7150) map; the live FDT of other
+ * Qualcomm SoCs (oneplus,waffle / SM8650) overrides these in shim_main. */
+static uintptr_t gicd_base = GICD_BASE_DEFAULT;
+static uintptr_t gicr_base = GICR_BASE_DEFAULT;
+static uintptr_t gicr_size = GICR_SIZE_DEFAULT;
+static uintptr_t gicr_pe_size = GICR_PE_SIZE_DEFAULT;
+
+/* qcom,msm-imem restart_reason register (imem base + 0x65c). */
+static uintptr_t imem_restart_reason = IMEM_RESTART_REASON;
+
 /* ICC_SGI1R_EL1 value targeting the calling core only. */
 static uint64_t sgi_self(unsigned id)
 {
@@ -106,7 +117,7 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	con_skip();
 	con_str("RESET", after_s > 20 ? "in 40s" : "in 20s");
 	delay_ms(after_s * 1000);
-	wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
+	wr32(imem_restart_reason, RESTART_BOOTLOADER);
 	__asm__ volatile("dsb sy" ::: "memory");
 	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
 	wr32(PSHOLD, 0);
@@ -210,10 +221,10 @@ static uintptr_t find_gicr(void)
 	uint64_t aff = rsr("mpidr_el1");
 	uint32_t want = (aff & 0xffffff) | ((aff >> 8) & 0xff000000);
 
-	for (uintptr_t off = 0; off < GICR_SIZE; off += GICR_PE_SIZE) {
-		uint64_t typer = rd64(GICR_BASE + off + GICR_TYPER);
+	for (uintptr_t off = 0; off < gicr_size; off += gicr_pe_size) {
+		uint64_t typer = rd64(gicr_base + off + GICR_TYPER);
 		if ((uint32_t)(typer >> 32) == want)
-			return GICR_BASE + off;
+			return gicr_base + off;
 		if (typer & (1 << 4))	/* Last */
 			break;
 	}
@@ -222,7 +233,7 @@ static uintptr_t find_gicr(void)
 
 static void gicd_wait_rwp(void)
 {
-	for (int i = 0; i < 1000000 && (rd32(GICD_BASE) & (1U << 31)); i++)
+	for (int i = 0; i < 1000000 && (rd32(gicd_base) & (1U << 31)); i++)
 		;
 }
 
@@ -292,11 +303,11 @@ static void test_gic(void)
 	}
 
 	stage = "gic dist";
-	uint32_t dctlr = rd32(GICD_BASE);
+	uint32_t dctlr = rd32(gicd_base);
 	/* Non-secure view (DS=0): bit0 EnableGrp1, bit1 EnableGrp1A, bit4 ARE_NS; Linux writes 0x13 */
-	wr32(GICD_BASE, dctlr | 0x13);
+	wr32(gicd_base, dctlr | 0x13);
 	gicd_wait_rwp();
-	con_hex2("GICD", "was=", dctlr, "now=", rd32(GICD_BASE));
+	con_hex2("GICD", "was=", dctlr, "now=", rd32(gicd_base));
 
 	stage = "gic redist";
 	uintptr_t r = find_gicr();
@@ -373,11 +384,34 @@ static uint32_t to_us(uint64_t ticks)
 void shim_main(uint64_t dtb)
 {
 	struct mmu_info mi;
+	uint64_t fphys, fsize;
+
+	/* Discover the splash framebuffer (and GIC) from the live FDT so the
+	 * same shim binary probes OnePlus 12 (SM8650, waffle) and the original
+	 * sweet (SM7150). The payload's fb geometry (mkpayload --fb-*) is
+	 * authoritative for waffle; the FDT splash is the fallback. */
+	{
+		uint64_t fb_base = 0, fb_stride = 0;
+		uint32_t fb_w = 0, fb_h = 0, fb_depth = 0;
+		if (loader_peek_fb(dtb, &fb_base, &fb_stride, &fb_w, &fb_h, &fb_depth))
+			con_set_fb(fb_base, fb_w, fb_h, fb_stride);
+		else if (fdt_fb_probe(dtb, &fphys, &fsize) && fsize >= 0x100000)
+			con_set_fb(fphys, con_fb_w, con_fb_h, con_fb_stride);
+	}
+	if (fdt_compatible_reg(dtb, "arm,gic-v3", 0, &fphys, &fsize))
+		gicd_base = fphys;
+	if (fdt_compatible_reg(dtb, "arm,gic-v3", 1, &fphys, &fsize)) {
+		gicr_base = fphys;
+		gicr_size = fsize;
+		gicr_pe_size = (fsize > 0x100000) ? 0x40000UL : 0x20000UL;	/* GIC-600 vs sweet */
+	}
+	if (fdt_compatible_reg_suffix(dtb, "-imem", 0, &fphys, &fsize))
+		imem_restart_reason = fphys + 0x65c;
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
 	con_clear(RED);
-	con_str("SHIM", "sweet milestone 4: xnu loader");
+	con_str("SHIM", "sweet/waffle loader: xnu");
 	con_skip();
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
@@ -405,7 +439,7 @@ void shim_main(uint64_t dtb)
 	if (rc)
 		con_clear(RED);
 
-	con_str("SHIM", "sweet milestone 3");
+	con_str("SHIM", "sweet/waffle diagnostics");
 	con_skip();
 	con_hex2("DTB", "at=", dtb, "magic=", dtb ? __builtin_bswap32(rd32(dtb)) : 0);
 	con_hex2("IMAGE", "lo=", mi.img_lo, "hi=", mi.img_hi);
@@ -417,8 +451,8 @@ void shim_main(uint64_t dtb)
 	con_hex2("PARANGE", "mmfr0=", rsr("id_aa64mmfr0_el1") & 0xf, "tg16=", (rsr("id_aa64mmfr0_el1") >> 20) & 0xf);
 	con_skip();
 	con_hex("PAR img", mmu_probe((uintptr_t)shim_main));
-	con_hex("PAR fb", mmu_probe(FB_PHYS + 0x1000));
-	con_hex("PAR gic", mmu_probe(GICD_BASE));
+	con_hex("PAR fb", mmu_probe(con_fb_phys + 0x1000));
+	con_hex("PAR gic", mmu_probe(gicd_base));
 	con_hex("PAR 12G", mmu_probe(0x300000000UL));
 	con_skip();
 	con_hex2("FILL us", "off=", to_us(fill_off), "on=", to_us(fill_on));

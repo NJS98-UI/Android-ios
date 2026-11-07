@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack an xnu kernel Mach-O + ADT into the payload the sweet shim boots.
 
-  mkpayload.py KERNEL ADT OUT [--cmdline "..."] [--ramdisk IMAGE]
+  mkpayload.py KERNEL ADT OUT [--cmdline "..."] [--ramdisk IMAGE] [--fb-* ...]
 
 The kernel is linked as a PIE with LC_DYLD_CHAINED_FIXUPS. Nobody else
 (no kmutil, no iBoot) resolves those for us, and xnu only rebases static
@@ -10,15 +10,22 @@ rewritten to its unslid target. The shim then only copies flat segments.
 
 Payload layout (little endian, all offsets from payload start):
   0x000  char  magic[8] = "SWEETXNU"
-  0x008  u32   version = 1, nsegs
+  0x008  u32   version = 2, nsegs
   0x010  u64   virt_base      kernel VA that maps to phys_base
   0x018  u64   entry_va       LC_UNIXTHREAD pc
   0x020  u64   adt_off, adt_size
   0x030  u64   kernel_end_va  end of the highest segment (page aligned)
   0x038  u64   phys_base      kernel-managed RAM (same values as the ADT's dram-base/size)
   0x040  u64   mem_size
-  0x048  char  cmdline[608]
+  0x048  char  cmdline[576]
+  0x288  u64   fb_base        splash framebuffer phys (0 => shim's discovered value)
+  0x290  u64   fb_stride      row bytes (0 => shim's discovered value)
+  0x298  u32   fb_w, fb_h     pixel geometry (0 => shim's discovered value)
+  0x2a0  u32   fb_depth, _reserved
   0x2a8  seg[nsegs] { u64 vmaddr, vmsize, file_off(in payload), file_size }
+
+Version 1 (same magic, cmdline[608], no fb fields, segs still at 0x2a8) is
+accepted by the shim so legacy payloads keep booting; --fb-* forces v2.
 
 --ramdisk appends IMAGE as one more segment right after the kernel and moves
 kernel_end past it, so the shim needs no changes: the image lands below the
@@ -35,7 +42,9 @@ LC_SEGMENT_64, LC_UNIXTHREAD, LC_DYLD_CHAINED_FIXUPS = 0x19, 0x5, 0x80000034
 PAGE = 0x4000
 BOOT_LINE_LENGTH = 608
 CMDLINE = 0x48
-SEG_TABLE = CMDLINE + BOOT_LINE_LENGTH	# 0x2a8
+# v2: cmdline[576] then 32 bytes of fb geometry; segs stays at 0x2a8 (v1-compatible)
+SEG_TABLE = CMDLINE + 576 + 32	# 0x2a8
+FB_FIELDS = 0x288		# fb_base,fp_stride,w,h,depth,_reserved
 
 
 def parse_macho(buf):
@@ -140,7 +149,7 @@ def adt_dram(adt_blob):
             struct.unpack('<Q', chosen.prop('dram-size'))[0])
 
 
-def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
+def build(kernel_path, adt_path, cmdline, ramdisk_path=None, fb=None):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
     nfix = apply_chained_fixups(buf, m)
@@ -156,6 +165,7 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     adt_blob = open(adt_path, 'rb').read()
     # The ADT decides where the kernel's RAM is (mkadt.py --highmem).
     PHYS_BASE, MEM_SIZE = adt_dram(adt_blob)
+    fb = dict(fb) if fb else None
     pieces = [(s['vmaddr'], s['vmsize'], buf[s['fileoff']:s['fileoff'] + s['filesize']]) for s in segs]
     ramdisk = None
     if ramdisk_path:
@@ -180,16 +190,24 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     out += adt_blob
     out += b'\0' * (-len(out) & 0xf)
 
-    struct.pack_into('<8sII', out, 0, b'SWEETXNU', 1, len(pieces))
+    struct.pack_into('<8sII', out, 0, b'SWEETXNU', 2, len(pieces))
     struct.pack_into('<7Q', out, 0x10, virt_base, m['entry'], adt_off, len(adt_blob), kernel_end,
                      PHYS_BASE, MEM_SIZE)
-    cl = cmdline.encode()[:BOOT_LINE_LENGTH - 1]
+    cl = cmdline.encode()[:575]
     out[CMDLINE:CMDLINE + len(cl)] = cl
+    # Framebuffer geometry: filled by the caller for v2 so boot_args Video and
+    # the ADT sweet-fbcon node agree. Zero => shim keeps its discovered default.
+    fb = fb or {}
+    struct.pack_into('<QQIIII', out, FB_FIELDS,
+                     fb.get('base', 0), fb.get('stride', 0),
+                     fb.get('width', 0), fb.get('height', 0), fb.get('depth', 0), 0)
     for i, t in enumerate(seg_table):
         struct.pack_into('<4Q', out, SEG_TABLE + 32 * i, *t)
     info = dict(cputype=hex(m['cputype']), cpusub=m['cpusub'], fixups=nfix, virt_base=hex(virt_base),
                 entry=hex(m['entry']), kernel_end=hex(kernel_end), ramdisk=ramdisk, size=len(out),
                 segs=[(s['name'], hex(s['vmaddr']), hex(s['vmsize'])) for s in segs])
+    if fb:
+        info['fb'] = fb
     return bytes(out), info
 
 
@@ -198,8 +216,17 @@ if __name__ == '__main__':
     ap.add_argument('kernel'); ap.add_argument('adt'); ap.add_argument('out')
     ap.add_argument('--cmdline', default='debug=0xc serial=3 cpus=1 keepsyms=1')
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
+    ap.add_argument('--fb-base', type=lambda x: int(x, 0), help='framebuffer physical address')
+    ap.add_argument('--fb-stride', type=int, default=0, help='framebuffer row bytes')
+    ap.add_argument('--fb-w', type=int, default=0, help='framebuffer width px')
+    ap.add_argument('--fb-h', type=int, default=0, help='framebuffer height px')
+    ap.add_argument('--fb-depth', type=int, default=0, help='framebuffer bits per pixel')
     a = ap.parse_args()
-    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk)
+    fb = None
+    if a.fb_base is not None:
+        fb = dict(base=a.fb_base, stride=a.fb_stride, width=a.fb_w,
+                  height=a.fb_h, depth=a.fb_depth)
+    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk, fb)
     open(a.out, 'wb').write(blob)
     for k, v in info.items():
         if k != 'segs':

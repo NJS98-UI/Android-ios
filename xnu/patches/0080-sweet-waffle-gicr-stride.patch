@@ -1,0 +1,77 @@
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 92f3e26..ff978e0 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -42,6 +42,12 @@ const char * gIOKernelConfigTables =
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
+     "   {"
++    "     'IOClass'         = SweetPlatformExpert;"
++    "     'IOProviderClass' = IOPlatformExpertDevice;"
++    "     'IONameMatch'     = 'oneplus,waffle';"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
++    "   {"
+     "     'IOClass'         = SweetCPU;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+     "     'IONameMatch'     = 'qcom,kryo470';"
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+index 6089db9..fdcec70 100644
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -26,6 +26,11 @@ static vm_offset_t gicd_base;
+ static vm_offset_t gicr_base;
+ static vm_offset_t gicr_size;
+ 
++/* Per-core redistributor frame stride. Defaults to GICR_PE_SIZE; the ADT may
++ * override via the gic node's "redistributor-stride" property (needed on
++ * SM8650 where the redistributor stride is 0x40000). */
++static SECURITY_READ_ONLY_LATE(uint32_t) gicr_pe_stride = GICR_PE_SIZE;
++
+ static uint32_t
+ _gic_read32(vm_offset_t addr)
+ {
+@@ -56,7 +61,7 @@ find_gicr_pe_base()
+ 	// We only care about aff1 and aff0
+ 	uint32_t phys_id = __builtin_arm_rsr64("MPIDR_EL1") & (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK);
+ 
+-	for (vm_offset_t offset = 0; offset < gicr_size; offset += GICR_PE_SIZE) {
++	for (vm_offset_t offset = 0; offset < gicr_size; offset += gicr_pe_stride) {
+ 		vm_offset_t gicr_pe_base = gicr_base + offset;
+ 		uint64_t gicr_typer = gicr_read64(GICR_TYPER);
+ 		uint32_t aff_value = (uint32_t) (gicr_typer >> GICR_TYPER_AFFINITY_VALUE_SHIFT) & (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK);
+@@ -119,6 +124,21 @@ pe_init_fiq()
+ 		kprintf("SWEET GIC: virtual timer INTID %u\n", sweet_vtimer_intid);
+ #endif
+ 
++		/* Optional ADT override of the per-core redistributor frame size. */
++		void const *stride_prop;
++		unsigned int stride_size;
++		if (SecureDTGetProperty(entry, "redistributor-stride", &stride_prop, &stride_size) == kSuccess) {
++			if (stride_size != sizeof(uint32_t)) {
++				panic("%s: invalid redistributor-stride size %u", __func__, stride_size);
++			}
++			uint32_t stride = *(const uint32_t *)stride_prop;
++			if (stride < GICR_PE_SIZE || (stride % 0x10000) != 0) {
++				panic("%s: invalid redistributor-stride 0x%x", __func__, stride);
++			}
++			gicr_pe_stride = stride;
++		}
++		kprintf("GICR: redistributor stride 0x%x\n", gicr_pe_stride);
++
+ 		vm_offset_t soc_base_phys = pe_arm_get_soc_base_phys();
+ 
+ 		uint64_t const gicd_base_prop = ((uint64_t const *) prop)[0];
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index b99c2f4..beb2ea5 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -52,7 +52,7 @@
+ 
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
+ 
+-#define GICR_PE_SIZE              0x20000 // Size of each redistributor region
++#define GICR_PE_SIZE              0x20000 // Size of each redistributor region (default; ADT may override)
+ 
+ /* GICv3 register definitions; see GICv3 spec (Arm IHI 0069G) */
+ #define GICD_CTLR                 0x0

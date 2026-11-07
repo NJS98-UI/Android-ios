@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-#define FB_BASE		0x9c000000UL	/* reserved-memory cont_splash_region */
+#define FB_BASE		0x9c000000UL	/* Redmi Note 10 Pro splash (fallback) */
 #define FB_W		1080
 #define FB_H		2400
 #define FB_STRIDE	(FB_W * 4)	/* a8r8g8b8, matches mainline simplefb */
@@ -13,7 +13,12 @@
 #define GREEN	0xff00ff00U
 
 extern volatile uint32_t *con_fb;
+/* Runtime panel geometry; con_set_fb() overrides before the first draw when
+ * the ABL splash was found in the live FDT (oneplus,waffle etc.). */
+extern uintptr_t con_fb_phys;
+extern unsigned con_fb_w, con_fb_h, con_fb_stride;
 
+void con_set_fb(uintptr_t phys, unsigned w, unsigned h, unsigned stride);
 void con_clear(uint32_t bg);
 void con_skip(void);
 void con_str(const char *label, const char *s);

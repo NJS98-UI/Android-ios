@@ -19,13 +19,23 @@ struct payload_seg {
 	uint64_t vmaddr, vmsize, file_off, file_size;
 };
 
+/*
+ * Payload: v1 is the original layout (cmdline[608], segs at 0x2a8). v2 reuses
+ * the tail of cmdline for framebuffer geometry so segs stays at 0x2a8 and v1
+ * payloads remain bootable (their fb fields read as zero => keep shim default).
+ */
 struct payload {
-	char magic[8];
-	uint32_t version, nsegs;
-	uint64_t virt_base, entry_va, adt_off, adt_size, kernel_end;
-	uint64_t phys_base, mem_size;
-	char cmdline[BOOT_LINE_LENGTH];
-	struct payload_seg segs[];
+	char magic[8];			/* 0x00: "SWEETXNU" */
+	uint32_t version, nsegs;	/* 0x08 */
+	uint64_t virt_base, entry_va;	/* 0x10 */
+	uint64_t adt_off, adt_size;	/* 0x20 */
+	uint64_t kernel_end;		/* 0x30 */
+	uint64_t phys_base, mem_size;	/* 0x38 */
+	char cmdline[576];		/* 0x48 */
+	uint64_t fb_base, fb_stride;	/* 0x288 */
+	uint32_t fb_w, fb_h, fb_depth;	/* 0x298 */
+	uint32_t _reserved;		/* 0x2a4, pad to 0x2a8 */
+	struct payload_seg segs[];	/* 0x2a8 */
 };
 
 /* pexpert/pexpert/arm64/boot.h, Revision/Version 2 */
@@ -76,6 +86,28 @@ static int magic_ok(const char *m)
 
 typedef void (*xnu_entry_t)(uint64_t boot_args_pa);
 
+int loader_peek_fb(uintptr_t dtb, uint64_t *base, uint64_t *stride,
+                   uint32_t *w, uint32_t *h, uint32_t *depth)
+{
+	uint64_t rd_start, rd_end;
+	if (!fdt_chosen_u64(dtb, "linux,initrd-start", &rd_start) ||
+	    !fdt_chosen_u64(dtb, "linux,initrd-end", &rd_end))
+		return 0;
+	if (rd_start & 7)
+		return 0;
+	const struct payload *p = (const struct payload *)rd_start;
+	if (!magic_ok(p->magic) || p->version < 1 || p->version > 2)
+		return 0;
+	if (!p->fb_base)
+		return 0;
+	*base = p->fb_base;
+	*stride = p->fb_stride;
+	*w = p->fb_w;
+	*h = p->fb_h;
+	*depth = p->fb_depth;
+	return 1;
+}
+
 const char *loader_boot(uintptr_t dtb)
 {
 	uint64_t rd_start, rd_end;
@@ -88,7 +120,7 @@ const char *loader_boot(uintptr_t dtb)
 	const struct payload *p = (const struct payload *)rd_start;
 	if (!magic_ok(p->magic))
 		return "no SWEETXNU payload";
-	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7))
+	if (p->version < 1 || p->version > 2 || (p->adt_off & 7) || (rd_start & 7))
 		return "bad payload header";
 
 	uint64_t pa_of_va_base = p->phys_base - p->virt_base;	/* pa = va + this */
@@ -123,16 +155,17 @@ const char *loader_boot(uintptr_t dtb)
 	ba->physBase = p->phys_base;
 	ba->memSize = p->mem_size;
 	ba->topOfKernelData = top;
-	ba->Video.v_baseAddr = FB_BASE;
+	ba->Video.v_baseAddr = p->fb_base ? p->fb_base : con_fb_phys;
 	ba->Video.v_display = 1;
-	ba->Video.v_rowBytes = FB_STRIDE;
-	ba->Video.v_width = FB_W;
-	ba->Video.v_height = FB_H;
-	ba->Video.v_depth = 32;
+	ba->Video.v_rowBytes = p->fb_stride ? p->fb_stride : con_fb_stride;
+	ba->Video.v_width = p->fb_w ? p->fb_w : con_fb_w;
+	ba->Video.v_height = p->fb_h ? p->fb_h : con_fb_h;
+	ba->Video.v_depth = p->fb_depth ? p->fb_depth : 32;
 	ba->deviceTreeP = adt_pa - pa_of_va_base;	/* xnu reads it with the MMU on: a VA */
 	ba->deviceTreeLength = (uint32_t)p->adt_size;
+	/* v2 payload cmdline is 576 bytes; zero the rest of boot_args. */
 	for (int i = 0; i < BOOT_LINE_LENGTH; i++)
-		ba->CommandLine[i] = p->cmdline[i];
+		ba->CommandLine[i] = i < (int)sizeof(p->cmdline) ? p->cmdline[i] : 0;
 	ba->memSizeActual = p->mem_size;
 	con_hex2("BOOTARG", "pa=", ba_pa, "top=", top);
 

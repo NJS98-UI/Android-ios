@@ -1,5 +1,59 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> WAFFLE PORT HANDOFF (2026-11-06, read this first) <<<
+
+**Goal: adapt ios-sweet to OnePlus 12 (SM8650, codename `waffle`, 16/12 GiB RAM).**
+The device is not on hand: no live FDT, no ABL splash address, no touch IC
+confirmation. All sweet artifacts must stay byte-identical. Porting is done via
+**device profiles + runtime FDT discovery**, not by duplicating files.
+
+### Hardware diff (sweet SM7150 -> waffle SM8650, verified from upstream `sm8650.dtsi`)
+| item | sweet | waffle |
+|------|-------|--------|
+| GICD / GICR | 0x17a00000 / 0x17a60000 | 0x17100000 / 0x17180000 |
+| GICR stride | 0x20000 | 0x40000 |
+| UFS (ufshc) | 0x01d84000 | 0x01d84000 (same; dma-coherent) |
+| USB DWC3 | (not used in shim) | usb@a600000, snps-dwc3 |
+| TLMM | - | 0x0f100000 |
+| apps_rsc (RPMh) | - | 0x17a00000 (tcs-offset 0xd00) |
+| SPMI | 0x0c400000... | 0x0c400000/0x0c440000/0x0c42d000 |
+| IMEM | 0x146aa000 (restart@0x65c) | 0x14680000 (restart@0x65c, to confirm) |
+| CPU topology | 6x A55 | 0-1 A520, 2-6 A720, 7 X4 (MPIDR Aff1=core#) |
+| Panel | 1080x2400 (FHD AMOLED) | 6.82" 1440x3168 LTPO (BOE Q9+); ABL splash addr unknown |
+| Touch | GT9896 @0x5d, GENI SE7, RPMh L11C | unknown (candidate Goodix/Samsung) |
+| Boot header | v2 + --dtb | v4 (no dtb field; ABL passes live DTB via x0) |
+
+### What is done
+- `tools/mkadt.py`: device profiles `--device sweet|waffle` + `--fb-*`, `--phys-base`, `--mem-size`; waffle emits GICD/GICR/stride/CPU-freq/compatible (`oneplus,waffle`+`qcom,sm8650`) correctly; sweet output byte-identical (verified via `adt.parse`: GICD 0x17a00000, FB 0x9c000000, no stride).
+- `shim/fdt.{c,h}`: `fdt_fb_probe()` (splash in /reserved-memory), `fdt_compatible_reg()` / `fdt_compatible_reg_suffix()` (any compatible -> reg pair, exact or suffix), `strstr_node()`. Host-verified against a synthetic waffle DTB: fb 0xfce00000/0x1200000, GICD 0x17100000, GICR 0x17180000/0x200000, imem base 0x14680000 all return correctly.
+- `shim/console.{c,h}`: FB geometry runtime (`con_set_fb()`), defaults = sweet constants.
+- `shim/mmu.c`: L2 maps `con_fb_phys` (not FB_PHYS) as NC.
+- `shim/shim.c`: GICD/GICR/stride + IMEM restart_reason are runtime globals probed from the live FDT in `shim_main()` (imem found via `-imem` suffix, restart at base+0x65c); sweet defaults kept; `test_gic`/`find_gicr`/`reset` use them.
+- `shim/loader.c`: payload v2 (fb_base/stride/w/h/depth at 0x288, segs still 0x2a8, cmdline 576); accepts v1; boot_args Video from payload fb (0 => shim discovered value); `loader_peek_fb()` lets shim_main apply the payload geometry before the first draw (FDT splash probe is the fallback). Offsets verified by host-gcc `_Static_assert`.
+- `tools/mkpayload.py`: v2 writer, `--fb-*` args; verified end-to-end (C struct reads back exact fb values).
+- `shim/build.sh`: `BOOTIMG_VER=2|4` selects header v2 (+--dtb) vs v4 (no dtb).
+- `tools/unpack_bootv2.py`: vendor_boot v3/v4 unpack (magic `VNDRBOOT`) + boot v0-v2 (magic `ANDROID!`), incl. vendor_ramdisk table.
+- `xnu/patches/0080-sweet-waffle-gicr-stride.patch` (NEW): `KernelConfigTables.cpp` adds a second `SweetPlatformExpert` entry with `IONameMatch='oneplus,waffle'` (sweet entry untouched); `pe_fiq.c find_gicr_pe_base()` strides by a runtime `gicr_pe_stride` (default `GICR_PE_SIZE` 0x20000) that `pe_init_fiq()` overrides from the gic node's optional `redistributor-stride` ADT property (mkadt emits 0x40000 for waffle). Validated on host: the full chain (stage scripts + 0001-0079 + 0080) applies cleanly to `xnu-8796.141.3`.
+  - Caveat: `0019-stage-libpthread.sh` needs macOS `xcrun` (SDK libpthread sources); 0020/0026 (BearSSL, HFS) stage fine on Linux. libpthread staging does NOT affect 0080's targets.
+
+Note: no aarch64 cross-compiler in this environment, so the shim cannot be
+built here (host `gcc -fsyntax-only` + `_Static_assert` + the FDT/payload host
+tests are the available verification).
+
+### Next steps (ordered)
+1. **Kernel binary** (the hard blocker): the full patch chain (incl. 0080) applies cleanly to `xnu-8796.141.3` on Linux. Build still needs macOS (darwin-xnu-build) — use the existing GitHub Actions workflow `xnu.yml` (macos-14). Run it with 0080 in the tree; the produced kernel (e.g. `kernel.sweet` for waffle=ARM64_BOARD_CONFIG_SWEET) is what the waffle boot.img wraps.
+2. Confirm 0061 render code letterboxes dst>src (1440x3168 canvas, 1125x2436 content), else present at native size.
+3. shim `shim.c`: finalize IMEM profile once the real DTB is known.
+4. Build waffle boot image: `BOOTIMG_VER=4 DEVICE=waffle shim/build.sh payload.bin` (needs an aarch64 toolchain; CI or a host with `aarch64-linux-gnu-gcc`).
+5. Update this file with concrete bring-up results after the first real `fastboot boot`.
+
+### Data needed from the real device (blocks bring-up)
+- Stock `vendor_boot` DTB (live FDT): confirms splash fb addr/size, touch IC + IRQ, keys, USB, IMEM offset.
+- ABL splash framebuffer address (else first boot shows no console; use `mkpayload --fb-addr <cont_splash>` as a manual override).
+- Waffle boot image header version actually used by ABL (`fastboot boot` v4 assumed).
+
+---
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

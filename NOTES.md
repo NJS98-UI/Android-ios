@@ -35,6 +35,7 @@ confirmation. All sweet artifacts must stay byte-identical. Porting is done via
 - `tools/unpack_bootv2.py`: vendor_boot v3/v4 unpack (magic `VNDRBOOT`) + boot v0-v2 (magic `ANDROID!`), incl. vendor_ramdisk table.
 - `xnu/patches/0080-sweet-waffle-gicr-stride.patch` (NEW): `KernelConfigTables.cpp` adds a second `SweetPlatformExpert` entry with `IONameMatch='oneplus,waffle'` (sweet entry untouched); `pe_fiq.c find_gicr_pe_base()` strides by a runtime `gicr_pe_stride` (default `GICR_PE_SIZE` 0x20000) that `pe_init_fiq()` overrides from the gic node's optional `redistributor-stride` ADT property (mkadt emits 0x40000 for waffle). Validated on host: the full chain (stage scripts + 0001-0079 + 0080) applies cleanly to `xnu-8796.141.3`.
   - Caveat: `0019-stage-libpthread.sh` needs macOS `xcrun` (SDK libpthread sources); 0020/0026 (BearSSL, HFS) stage fine on Linux. libpthread staging does NOT affect 0080's targets.
+  - CI: pushed `2be689a` to origin/main; triggered `xnu.yml` run **42319972983** (macos-14, macos_version 13.5, kernel_config DEVELOPMENT, machine_config SWEET, keep_going). Kernel artifact `xnu-kernel` will hold the waffle-compatible `kernel.sweet` binary (same ARM64_BOARD_CONFIG_SWEET build; waffle matches via IONameMatch).
 
 Note: no aarch64 cross-compiler in this environment, so the shim cannot be
 built here (host `gcc -fsyntax-only` + `_Static_assert` + the FDT/payload host

@@ -1,0 +1,20 @@
+name: runner-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: runner label to test
+        required: true
+        default: macos-14
+
+jobs:
+  probe:
+    runs-on: ${{ github.event.inputs.label }}
+    timeout-minutes: 3
+    steps:
+      - name: Who am I
+        run: |
+          echo "runner=$RUNNER_NAME platform=$RUNNER_OS arch=$RUNNER_ARCH label=${{ github.event.inputs.label }}"
+          sw_vers 2>/dev/null || uname -a
+          xcodebuild -version 2>/dev/null || true

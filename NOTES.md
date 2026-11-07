@@ -36,16 +36,18 @@ confirmation. All sweet artifacts must stay byte-identical. Porting is done via
 - `xnu/patches/0080-sweet-waffle-gicr-stride.patch` (NEW): `KernelConfigTables.cpp` adds a second `SweetPlatformExpert` entry with `IONameMatch='oneplus,waffle'` (sweet entry untouched); `pe_fiq.c find_gicr_pe_base()` strides by a runtime `gicr_pe_stride` (default `GICR_PE_SIZE` 0x20000) that `pe_init_fiq()` overrides from the gic node's optional `redistributor-stride` ADT property (mkadt emits 0x40000 for waffle). Validated on host: the full chain (stage scripts + 0001-0079 + 0080) applies cleanly to `xnu-8796.141.3`.
   - Caveat: `0019-stage-libpthread.sh` needs macOS `xcrun` (SDK libpthread sources); 0020/0026 (BearSSL, HFS) stage fine on Linux. libpthread staging does NOT affect 0080's targets.
   - CI: pushed `2be689a` to origin/main; triggered `xnu.yml` run **42319972983** (macos-14, macos_version 13.5, kernel_config DEVELOPMENT, machine_config SWEET, keep_going). Kernel artifact `xnu-kernel` will hold the waffle-compatible `kernel.sweet` binary (same ARM64_BOARD_CONFIG_SWEET build; waffle matches via IONameMatch).
+  - **CI BLOCKED (2026-11-07)**: GitHub-hosted macOS runners are unavailable on this account — `macos-14` fails instantly with "The configuration 'macos-14-arm64-us-xl' is not supported" (runs 42319839892/42319972983/42320033608/42320352057), and `macos-13` stays queued forever (runner pool retired; run 42320614336 never started). Workflow reverted to `macos-14` (the correct Xcode-15/iig config). Kernel build needs either a working macOS runner (account/plan fix, self-hosted macOS) or a local Mac host: `xnu-8796.141.3` + `darwin-xnu-build` pinned at `663906528d1cd5ea8fde7de6f16de73db9511549`.
+  - **Shim builds for waffle (this env has `aarch64-linux-gnu-gcc` 12)**: `DEVICE=waffle BOOTIMG_VER=4 shim/build.sh` -> `shim/out/shim-boot.img` (192 KiB, boot v4, empty newc cpio ramdisk) + raw `shim/out/Image` (184 KiB). Fixes applied: `build.sh` now resolves its own dir via `BASH_SOURCE` (was broken when invoked from the repo root) and vendored `tools/mkbootimg/` (AOSP `mkbootimg.py` + gki cert module, committed). Deliverable copied to `package/shim-boot-waffle.img` + `package/shim-image-waffle.bin` + `package/README.md` (finish/steps doc).
 
 Note: no aarch64 cross-compiler in this environment, so the shim cannot be
 built here (host `gcc -fsyntax-only` + `_Static_assert` + the FDT/payload host
 tests are the available verification).
 
 ### Next steps (ordered)
-1. **Kernel binary** (the hard blocker): the full patch chain (incl. 0080) applies cleanly to `xnu-8796.141.3` on Linux. Build still needs macOS (darwin-xnu-build) — use the existing GitHub Actions workflow `xnu.yml` (macos-14). Run it with 0080 in the tree; the produced kernel (e.g. `kernel.sweet` for waffle=ARM64_BOARD_CONFIG_SWEET) is what the waffle boot.img wraps.
+1. **Kernel binary** (the hard blocker): the full patch chain (incl. 0080) applies cleanly to `xnu-8796.141.3` on Linux. Build needs macOS (darwin-xnu-build). GitHub-hosted runners are unavailable on this account (see CI BLOCKED above); options: (a) get a working macOS runner, (b) build on a local Mac: `MACHINE_CONFIG=SWEET bash <dxb>/build.sh` -> `kernel.sweet`. The produced kernel is what the waffle boot.img wraps.
 2. Confirm 0061 render code letterboxes dst>src (1440x3168 canvas, 1125x2436 content), else present at native size.
 3. shim `shim.c`: finalize IMEM profile once the real DTB is known.
-4. Build waffle boot image: `BOOTIMG_VER=4 DEVICE=waffle shim/build.sh payload.bin` (needs an aarch64 toolchain; CI or a host with `aarch64-linux-gnu-gcc`).
+4. Build waffle boot image: `BOOTIMG_VER=4 DEVICE=waffle shim/build.sh payload.bin` (aarch64 toolchain present locally now; this is the only remaining gated step after the kernel binary + real fb addr).
 5. Update this file with concrete bring-up results after the first real `fastboot boot`.
 
 ### Data needed from the real device (blocks bring-up)

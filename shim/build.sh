@@ -3,7 +3,8 @@
 #   BOOTIMG_VER=2 (default)   sweet: v2 with embedded DTB
 #   BOOTIMG_VER=4             oneplus,waffle: v4, DTB comes from vendor_boot/ABL
 set -euo pipefail
-cd "$(dirname "$0")"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "$SCRIPT_DIR"
 CC=aarch64-linux-gnu-gcc
 OBJCOPY=aarch64-linux-gnu-objcopy
 # DEVICE=waffle -> no fallback FB draw (probe-only), plus the waffle boot image defaults
@@ -35,7 +36,7 @@ fi
 # the live DTB from vendor_boot) for oneplus,waffle / SM8650.
 # BOOTIMG_VER=v4 DEVICE=waffle ./build.sh payload
 BOOTIMG_VER=${BOOTIMG_VER:-2}
-MKBOOTIMG="python3 $(dirname "$0")/../tools/mkbootimg/mkbootimg.py"
+MKBOOTIMG="python3 $SCRIPT_DIR/../tools/mkbootimg/mkbootimg.py"
 if [ "$BOOTIMG_VER" = 4 ]; then
 	$MKBOOTIMG --header_version 4 --kernel out/Image --ramdisk out/ramdisk.bin \
 		--base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \

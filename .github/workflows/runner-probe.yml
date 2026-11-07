@@ -18,3 +18,5 @@ jobs:
           echo "runner=$RUNNER_NAME platform=$RUNNER_OS arch=$RUNNER_ARCH label=${{ github.event.inputs.label }}"
           sw_vers 2>/dev/null || uname -a
           xcodebuild -version 2>/dev/null || true
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          xcrun --find iig 2>/dev/null || echo "no iig"

@@ -185,11 +185,17 @@ truncate -s "$size" "$hfs"
 mkfs.hfsplus -s -J -v iOSRoot "$hfs"
 # The appliance needs modprobe hfsplus and a short mount retry; it has no
 # python3, so post.sh (inside the overlay tar) does the links/moves/unmount.
+# libguestfs needs a TCG fallback when /dev/kvm is absent (Android chroot,
+# containers, GitHub-hosted runners). force_tcg is a no-op when KVM exists.
+export LIBGUESTFS_BACKEND_SETTINGS=${LIBGUESTFS_BACKEND_SETTINGS:-force_tcg}
 export SUPERMIN_KERNEL=${SUPERMIN_KERNEL:-/boot/vmlinuz-$(uname -r)}
 export SUPERMIN_MODULES=${SUPERMIN_MODULES:-/lib/modules/$(uname -r)}
+# guestfish parses the debug sh string itself: backslash-dollar is an invalid
+# escape there. The heredoc is single-quoted, so $ is already literal here and
+# the appliance's /bin/sh expands it at runtime.
 cat > "$WORK/inject.gf" <<'CMDS'
 run
-debug sh "modprobe hfsplus 2>/dev/null || true; mkdir -p /hfs; i=0; until mount -t hfsplus -o force,rw /dev/sda /hfs 2>/dev/null; do i=\$((i+1)); [ \$i -ge 5 ] && { echo MOUNT_FAIL; exit 1; }; sleep 1; done; echo MOUNTED; tar -xf /dev/sdb -C /hfs; tar -xf /dev/sdc -C /hfs; tar -xf /dev/sdd -C /hfs; tar -xf /dev/sde -C /hfs; cp /hfs/post.sh /post.sh; rm -f /hfs/post.sh; sh /post.sh; umount /hfs || { echo UMOUNT_FAIL; exit 1; }; echo UMOUNT_OK"
+debug sh "modprobe hfsplus 2>/dev/null || true; mkdir -p /hfs; i=0; until mount -t hfsplus -o force,rw /dev/sda /hfs 2>/dev/null; do i=$((i+1)); [ $i -ge 5 ] && { echo MOUNT_FAIL; exit 1; }; sleep 1; done; echo MOUNTED; tar -xf /dev/sdb -C /hfs; tar -xf /dev/sdc -C /hfs; tar -xf /dev/sdd -C /hfs; tar -xf /dev/sde -C /hfs; cp /hfs/post.sh /post.sh; rm -f /hfs/post.sh; sh /post.sh; umount /hfs || { echo UMOUNT_FAIL; exit 1; }; echo UMOUNT_OK"
 CMDS
 guestfish -a "$hfs" -a "$ostar" -a "$systar" -a "$apptar" -a "$overlay" < "$WORK/inject.gf"
 # The tars are no longer needed once the HFS volume is populated.

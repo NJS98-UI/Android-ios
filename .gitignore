@@ -13,3 +13,9 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+
+# local toolchain workspace (never commit Apple-derived build trees)
+out-repro/
+local-build/*.log
+local-build/*.img
+local-build/*.simg

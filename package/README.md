@@ -11,9 +11,12 @@ A complete flashable bring-up set has **two** artifacts plus a script:
 
 `ios16-root.simg` is **not committed**: Apple's root is copyrighted and the
 sparse image is ~12 GiB. Build it with `tools/build-ios-root.sh` from the
-iPhone10,3 `16.7.16 (20H392)` IPSW (see below). Until it exists,
-`flash-waffle.sh` refuses to run and `shim-boot-waffle.img` alone stops at
-"cannot mount root" — a boot image is not a complete iOS system.
+iPhone10,3 `16.7.16 (20H392)` IPSW (see below). The script is self-contained:
+it downloads the three dmgs with `--fetch-ipsw`, and builds `apfs_extract`
+from the committed `tools/apfs_extract.cpp` + an apfs-fuse clone
+(`tools/build-apfs-extract.sh`) when the binary is absent. Until the root
+image exists, `flash-waffle.sh` refuses to run and `shim-boot-waffle.img`
+alone stops at "cannot mount root" — a boot image is not a complete iOS system.
 
 ## Boot image (verified locally)
 
@@ -56,15 +59,24 @@ guess corrupted the GIC address. Host-tested against C16 `dtb2`/`dtb3`, C14
 
 ## Build the iOS root (`tools/build-ios-root.sh`)
 
+Simplest (downloads the three dmgs + builds `apfs_extract` automatically):
+```
+tools/build-ios-root.sh --fetch-ipsw \
+  'https://updates.cdn-apple.com/.../iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw' \
+  package/ios16-root.simg
+```
+Or supply dmgs already fetched with `tools/remotezip.py`:
 ```
 tools/build-ios-root.sh OS.dmg SystemOS.dmg AppOS.dmg package/ios16-root.simg
 ```
 
 Inputs come from
-`iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw` (ipsw.me; use
-`tools/remotezip.py` to fetch only the three dmgs + `d22ap.im4p`). The script
-needs apfs-fuse's `apfs_extract`, guestfish, hfsprogs, img2simg, ~35-40 GiB
-free and root. Pipeline: APFS dmg -> one pax tar each with decmpfs
+`iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw` (ipsw.me; `d22ap.im4p`
+is only needed to regenerate `waffle-test.adt`). Needs git/cmake/ninja/g++,
+libarchive/zlib/bz2/openssl dev headers (for the one-time `apfs_extract`
+build), guestfish, hfsprogs, img2simg, ~35-40 GiB free and root.
+`tools/build-apfs-extract.sh` can also be run once to prebuild the exporter.
+Pipeline: APFS dmg -> one pax tar each with decmpfs
 decompression (7zz and libfsapfs cannot do this) -> all four tars attached as
 virtio-blk disks, extracted locally inside the libguestfs appliance
 (`tar -xf /dev/sdb` ... `/dev/sde`, measured ~100x faster than

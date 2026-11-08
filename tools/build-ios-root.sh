@@ -2,8 +2,11 @@
 # Build ios16-root.simg for the OnePlus 12 (waffle) userdata partition.
 #
 #   tools/build-ios-root.sh OS.dmg SYSTEMOS.dmg APPOS.dmg OUT.simg [SIZE]
+#   tools/build-ios-root.sh --fetch-ipsw IPSW_URL OUT.simg [SIZE]   (fetch dmgs too)
 #
-# SIZE defaults to 16G (must cover the userdata partition's used blocks).
+# apfs_extract is built automatically (tools/build-apfs-extract.sh) when it is
+# not on PATH. SIZE defaults to 16G (must cover the userdata partition's used
+# blocks).
 # This is the SWEET tools/mkiosroot.sh pipeline adapted to a Linux host with
 # NO hfsplus.ko, NO /dev/fuse and NO /dev/kvm:
 #
@@ -30,28 +33,56 @@
 # IPSW (7) + tars (15) + HFS raw while injecting (12) + simg (11), with the
 # tars/raw deleted as soon as each stage finishes. Requires root.
 #
-# Requirements: apfs-fuse's apfs_extract, libguestfs-tools (guestfish),
-#   hfsprogs (mkfs.hfsplus, fsck.hfsplus), android-sdk-libsparse-utils
-#   (img2simg), tar, python3. libguestfs supermin needs a matching
-#   kernel/modules and a populated modules.dep:
+# Requirements: git/cmake/ninja/g++ + libarchive/zlib/bz2/openssl dev headers
+#   (to build apfs_extract once), libguestfs-tools (guestfish), hfsprogs
+#   (mkfs.hfsplus, fsck.hfsplus), android-sdk-libsparse-utils (img2simg), tar,
+#   python3. libguestfs supermin needs a matching kernel/modules and a
+#   populated modules.dep:
 #     export SUPERMIN_KERNEL=/boot/vmlinuz-$(uname -r)
 #     export SUPERMIN_MODULES=/lib/modules/$(uname -r)
 #     depmod $(uname -r)      # on a shared-kernel host
 set -euo pipefail
 
-[[ $# -ge 4 ]] || { sed -n '2,8p' "$0"; exit 2; }
+repo=$(cd "$(dirname "$0")/.." && pwd)
+: "${WORK:=/tmp/ios-root-build}"
+mkdir -p "$WORK"
+
+# --fetch-ipsw: download just the three dmgs from the IPSW with HTTP Range,
+# then continue with the normal build. Resume is handled by remotezip.py.
+if [[ ${1:-} == --fetch-ipsw ]]; then
+    [[ $# -ge 3 ]] || { sed -n '2,10p' "$0"; exit 2; }
+    url=$2 outarg=$3 sizearg=${4:-16G}
+    "$repo/tools/remotezip.py" "$url" '087-86698-044.dmg' "$WORK"
+    "$repo/tools/remotezip.py" "$url" '087-86593-047.dmg' "$WORK"
+    "$repo/tools/remotezip.py" "$url" '087-86715-047.dmg' "$WORK"
+    mv "$WORK/087-86698-044.dmg" "$WORK/OS.dmg"
+    mv "$WORK/087-86593-047.dmg" "$WORK/SystemOS.dmg"
+    mv "$WORK/087-86715-047.dmg" "$WORK/AppOS.dmg"
+    set -- "$WORK/OS.dmg" "$WORK/SystemOS.dmg" "$WORK/AppOS.dmg" "$outarg" "$sizearg"
+fi
+
+[[ $# -ge 4 ]] || { sed -n '2,10p' "$0"; exit 2; }
 os=$(realpath "$1") sysos=$(realpath "$2") appos=$(realpath "$3")
 out=$(realpath -m "$4") size=${5:-16G}
-repo=$(cd "$(dirname "$0")/.." && pwd)
 
-for t in apfs_extract guestfish mkfs.hfsplus fsck.hfsplus img2simg tar python3; do
+for t in guestfish mkfs.hfsplus fsck.hfsplus img2simg tar python3; do
     command -v "$t" >/dev/null || { echo "missing tool: $t"; exit 2; }
 done
 [[ -f $repo/tools/sweet-root-tweaks.py ]] || { echo "missing sweet-root-tweaks.py"; exit 2; }
 [[ ! -e $out ]] || { echo "refusing to overwrite $out"; exit 1; }
 
-: "${WORK:=/tmp/ios-root-build}"
-mkdir -p "$WORK"
+# apfs_extract is not a distro package: build it from the committed source +
+# a third-party apfs-fuse clone when it is not already on PATH.
+if command -v apfs_extract >/dev/null; then
+    APFS_EXTRACT=$(command -v apfs_extract)
+elif [[ -x $WORK/build/apfs_extract ]]; then
+    APFS_EXTRACT=$WORK/build/apfs_extract
+else
+    echo "== 0/4 build apfs_extract =="
+    "$repo/tools/build-apfs-extract.sh" "$WORK/build" "$WORK/apfs-fuse"
+    APFS_EXTRACT=$WORK/build/apfs_extract
+fi
+
 hfs="$WORK/root.img"
 ostar="$WORK/os.tar" systar="$WORK/sysos.tar" apptar="$WORK/appos.tar"
 overlay="$WORK/overlay.tar"
@@ -61,9 +92,9 @@ echo "== 1/4 export APFS volumes to pax tars =="
 # system volume of each dmg (verified: OS 'SydneyUpdate20H392.D22D221OS',
 # SystemOS '...SystemCryptex', AppOS). OS.dmg is UDIF+lzfse; SystemOS/AppOS
 # are raw APFS. apfs_extract opens all three directly.
-apfs_extract "$os"    "$ostar"
-apfs_extract "$sysos" "$systar" --prefix 'private/preboot/Cryptexes/OS/'
-apfs_extract "$appos" "$apptar" --prefix 'private/preboot/Cryptexes/App/'
+"$APFS_EXTRACT" "$os"    "$ostar"
+"$APFS_EXTRACT" "$sysos" "$systar" --prefix 'private/preboot/Cryptexes/OS/'
+"$APFS_EXTRACT" "$appos" "$apptar" --prefix 'private/preboot/Cryptexes/App/'
 for t in "$ostar" "$systar" "$apptar"; do
     [[ -s $t ]] || { echo "$t empty"; exit 1; }
 done

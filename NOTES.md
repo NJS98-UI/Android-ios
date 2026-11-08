@@ -70,6 +70,24 @@ is a local observation, never a real-boot result.**
   `SUPERMIN_KERNEL=/boot/vmlinuz-6.1.0-54-amd64`,
   `SUPERMIN_MODULES=/lib/modules/6.1.0-54-amd64`, `depmod 6.1.0-54-amd64`.
 
+### Self-contained root build (user: "just execute it to compile?", 2026-11-08)
+- `command -v apfs_extract` was MISSING on this host and it was NOT in the
+  repo (it was a /tmp-only binary). Fixed: `tools/apfs_extract.cpp` committed,
+  `tools/build-apfs-extract.sh` clones `sgan81/apfs-fuse` (+ lzfse submodule),
+  cmake/ninja builds libapfs/libcrypto/liblzfse and links the exporter.
+  Clean-build verified (`SCRIPT_RC=0`, binary 388K, usage line printed).
+- `tools/build-ios-root.sh` now auto-builds/reuses `$WORK/build/apfs_extract`
+  when it is not on PATH, and `--fetch-ipsw URL OUT.simg` downloads the three
+  dmgs with `tools/remotezip.py` first. Integrated test with PATH lacking
+  apfs_extract: auto-discovery worked, three AppOS volumes exported
+  163 dirs / 884 files / 697 decompressed / 0 errors each. Stage 2 correctly
+  refused AppOS.dmg passed as OS.dmg (no `System/Library/xpc/launchd.plist`).
+  Real OS.dmg volume name verified: `SydneyUpdate20H392.D22D221OS`.
+- Answer to "can it just be executed if storage is enough": YES for the
+  software chain (deps auto-built, dmgs auto-fetched, all pipeline primitives
+  verified). The remaining hard requirement is ~35-40 GiB free + root + the
+  dev headers; this sandbox has 20 GiB total / 1.8 GiB free, so it cannot run.
+
 ### Why ios16-root.simg was not assembled here (observation, not a guess)
 - Host `/dev/root` is 20 GiB with ~1.6-3 GiB free after the 7.0 GiB IPSW +
   3.2 GiB sysos.tar; a 16 GiB raw HFS+ + 12 GiB sparse image cannot coexist.

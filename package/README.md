@@ -63,14 +63,16 @@ tools/build-ios-root.sh OS.dmg SystemOS.dmg AppOS.dmg package/ios16-root.simg
 Inputs come from
 `iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw` (ipsw.me; use
 `tools/remotezip.py` to fetch only the three dmgs + `d22ap.im4p`). The script
-needs apfs-fuse's `apfs_extract`, guestfish, hfsprogs, img2simg, ~40 GiB free
-and root. Pipeline: APFS dmg -> pax tars with decmpfs decompression (7zz and
-libfsapfs cannot do this) -> one tar attached as a virtio-blk disk, extracted
-locally inside the libguestfs appliance (`tar -xf /dev/sdb`, measured ~100x
-faster than `guestfish tar-in` here) -> host-built overlay with
-`sweet-root-tweaks.py` -> in-appliance `post.sh` for dyld/cryptex hard links
-and VirtualAudio removal -> `fsck.hfsplus -y` -> `img2simg`. Linux hfsplus
-decomposes a few localized names differently; fsck rewrites them.
+needs apfs-fuse's `apfs_extract`, guestfish, hfsprogs, img2simg, ~35-40 GiB
+free and root. Pipeline: APFS dmg -> one pax tar each with decmpfs
+decompression (7zz and libfsapfs cannot do this) -> all four tars attached as
+virtio-blk disks, extracted locally inside the libguestfs appliance
+(`tar -xf /dev/sdb` ... `/dev/sde`, measured ~100x faster than
+`guestfish tar-in` here) -> host-built overlay with `sweet-root-tweaks.py` ->
+in-appliance `post.sh` for dyld/cryptex hard links and VirtualAudio removal ->
+clean `umount` -> `fsck.hfsplus -y` -> `img2simg`. Linux hfsplus decomposes a
+few localized names differently; fsck rewrites them. The five-disk layout and
+clean unmount were verified end-to-end on small samples.
 
 Keep the dmgs, tars, raw HFS+ image and `ios16-root.simg` out of git. The
 `research/` tree (including `d22ap.adt`) is already gitignored.
@@ -116,8 +118,10 @@ use 5760 (1440*4). If ABL's live splash address becomes known, pass
   (it is gitignored; generate it from the IPSW as described above).
 - Root pipeline primitives verified on this host: three-dmg IPSW download
   (`ALL DOWNLOADS COMPLETE`, CRC-32 ok), SystemOS APFS->tar export
-  (1459 files, 1280 decompressed, 0 errors), raw-tar-disk injection, overlay,
-  hard links, uid/gid/mode, fsck, img2simg. The full 16 GiB root was **not**
+  (1459 files, 1280 decompressed, 0 errors), five-disk raw-tar injection,
+  overlay, dyld/cryptex hard links, symlinks, uid/gid/mode, VirtualAudio move,
+  clean `umount`, `fsck.hfsplus -y/-n`, `img2simg`, and a 2881-line generated
+  `post.sh` from the real SystemOS tar. The full 16 GiB root was **not**
   assembled here (this sandbox has 20 GiB total, no KVM, no hfsplus.ko).
 - No device was on hand: nothing here is real-boot verified. Splash FB phys,
   real panel rowBytes, touch IC/IRQ and gpio-keys still need the live FDT; a

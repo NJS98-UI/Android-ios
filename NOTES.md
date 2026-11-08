@@ -47,19 +47,24 @@ is a local observation, never a real-boot result.**
 
 ### Root injection pipeline (each primitive verified on this host)
 - `guestfish tar-in` over virtio-serial measured 0.44 MB/s (120 MiB in 272 s):
-  unusable for a 12 GiB root. Fix: attach the tar itself as a virtio-blk disk
-  (`guestfish -a hfs.img -a all.tar -a overlay.tar`), then inside the appliance
-  `tar -xf /dev/sdb -C /hfs` reads it locally. Small-sample end-to-end passed
-  twice, including `tar -A` concatenation, overlay overwrite, hard link
-  (`nlink=2`), uid/gid/mode, symlink, `mv`, `rm`, `fsck.hfsplus -y` repair and
+  unusable for a 12 GiB root. Fix: `tools/build-ios-root.sh` now attaches the
+  three separate dmg tars + overlay tar as four virtio-blk disks (no 12 GiB
+  `cp`/`tar -A`), extracting inside the appliance with `tar -xf /dev/sdb` ..
+  `/dev/sde`. Five-disk layout verified: sda=HFS+, sdb=os, sdc=sysos,
+  sdd=appos, sde=overlay, sdf=appliance root. Full small-sample end-to-end
+  passed: dyld cache hard link, cryptex file/symlink links, overlay overwrite,
+  uid/gid/mode, VirtualAudio move, `mv`/`rm`, `fsck.hfsplus -y/-n` and
   `img2simg`.
 - Appliance needs `modprobe hfsplus` + short mount retry (intermittent
   "wrong fs type" without it); it has GNU tar, chown, ln but NO python3, so
   `sweet-root-tweaks.py` runs on the host against a small staging tree and is
-  packed into `overlay.tar`. A generated `post.sh` inside that tar runs in the
-  appliance to hard-link dyld shared caches/cryptex files (sources only exist
-  in HFS+ at that point) and move VirtualAudio.plugin; verified against the
-  real 3.2 GiB SystemOS tar (2,881 generated lines, `sh -n` OK).
+  packed into `overlay.tar`. A generated `post.sh` is COPIED to the appliance
+  root (`cp /hfs/post.sh /post.sh; rm -f /hfs/post.sh; sh /post.sh`) because a
+  script running from the HFS volume makes `umount` report "target is busy";
+  the outer `debug sh` does a clean `umount /hfs` afterward (verified
+  `UMOUNT_OK` + fsck clean). post.sh hard-links dyld shared caches/cryptex
+  files and moves VirtualAudio.plugin; verified against the real 3.2 GiB
+  SystemOS tar (2,881 generated lines, `sh -n` OK, 44 dyld cache links).
 - `guestfish -i` and `upload` both fail here (no auto-mountable root fs); the
   script uses `run` + `debug sh` heredoc only. supermin env:
   `SUPERMIN_KERNEL=/boot/vmlinuz-6.1.0-54-amd64`,

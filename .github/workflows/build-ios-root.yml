@@ -1,0 +1,93 @@
+name: build-ios-root
+
+# Assemble ios16-root.simg (sparse HFS+ iOS 16.7.16 root for waffle / PJD110).
+# Apple's IPSW is fetched by HTTP Range inside the runner; the resulting sparse
+# image is uploaded as a workflow artifact. Requires ~40 GiB free on the
+# GitHub-hosted Ubuntu runner and uses libguestfs (no /dev/kvm, TCG appliance).
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: iPhone10,3 16.7.16 (20H392) IPSW URL
+        required: true
+        default: "https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw"
+      root_size:
+        description: raw HFS+ image size
+        required: true
+        default: "16G"
+
+concurrency:
+  group: build-ios-root-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  root:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      IPSW_URL: ${{ github.event.inputs.ipsw_url }}
+      ROOT_SIZE: ${{ github.event.inputs.root_size }}
+      WORK: ${{ github.workspace }}/.ios-root-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git cmake ninja-build g++ pkg-config \
+            libarchive-dev zlib1g-dev libbz2-dev libssl-dev \
+            libguestfs-tools hfsprogs android-sdk-libsparse-utils \
+            linux-image-generic udev
+          # libguestfs supermin appliance needs a kernel + populated modules.dep
+          KVER=$(ls /boot/vmlinuz-* | sort -V | tail -1 | sed 's|.*/vmlinuz-||')
+          echo "SUPERMIN_KERNEL=/boot/vmlinuz-$KVER" >> "$GITHUB_ENV"
+          echo "SUPERMIN_MODULES=/lib/modules/$KVER" >> "$GITHUB_ENV"
+          sudo depmod "$KVER" || true
+          guestfish --version
+          mkfs.hfsplus -V 2>&1 | head -2 || true
+          img2simg 2>&1 | head -2 || true
+          df -h /
+
+      - name: Verify IPSW inputs
+        run: |
+          python3 tools/remotezip.py "$IPSW_URL" | grep -E \
+            '087-86698-044\.dmg|087-86593-047\.dmg|087-86715-047\.dmg|BuildManifest\.plist'
+
+      - name: Build ios16-root.simg
+        run: |
+          mkdir -p "$WORK"
+          WORK="$WORK" SUPERMIN_KERNEL="$SUPERMIN_KERNEL" \
+          SUPERMIN_MODULES="$SUPERMIN_MODULES" \
+            bash tools/build-ios-root.sh \
+              --fetch-ipsw "$IPSW_URL" \
+              "$WORK/ios16-root.simg" "$ROOT_SIZE"
+          ls -lh "$WORK/ios16-root.simg"
+          sha256sum "$WORK/ios16-root.simg" | tee "$WORK/ios16-root.simg.sha256"
+          df -h /
+
+      - name: Verify sparse HFS+ image
+        run: |
+          set -e
+          OUT="$WORK/ios16-root.simg"
+          RAW="$WORK/verify.img"
+          simg2img "$OUT" "$RAW"
+          fsck.hfsplus -f -n "$RAW"
+          rm -f "$RAW" "$WORK/root.img" "$WORK"/*.dmg "$WORK"/*.dmg.part || true
+          df -h /
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios16-root
+          path: |
+            ${{ env.WORK }}/ios16-root.simg
+            ${{ env.WORK }}/ios16-root.simg.sha256
+          if-no-files-found: error
+          retention-days: 5

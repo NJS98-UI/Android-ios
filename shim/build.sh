@@ -50,6 +50,9 @@ else
 		--os_version 17.0.0 --os_patch_level 2035-06 \
 		--cmdline "console=null" -o out/shim-boot.img
 fi
-# Host render of the console layout.
-gcc -O1 -Wall -o out/host_test console.c host_test.c && ./out/host_test
+# Host render of the console layout.  Some filesystems (e.g. Android shared
+# storage) mount noexec, so stage the test binary in a private temp dir.
+HOST_TEST=$(mktemp "${TMPDIR:-/tmp}/shim-host_test.XXXXXX")
+gcc -O1 -Wall -o "$HOST_TEST" console.c host_test.c && "$HOST_TEST"
+rm -f "$HOST_TEST"
 ls -l out/Image out/shim-boot.img

@@ -1,5 +1,97 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> UPDATE 2026-11-08 (read first; C16 firmware + rebuilt package) <<<
+
+**Observation (not a guess): a real PJD110 ColorOS 16 firmware was fetched and its
+`vendor_boot` DTB parsed; the shim package was rebuilt against it. No device was
+on hand, so nothing here is a real-boot result.**
+
+### Firmware source (user asked me to fetch it myself, 2026-11-08)
+- `JerryTse-OSS/OPlus-Tracker`: `tomboy_pro.py PJD110_11.F cn --anti 1` returns
+  C16 `PJD110_16.0.10.501(CN01)`; the zip is an 8,609,482,664-byte signed S3 URL
+  that supports HTTP Range. `11.A` only returns C14 `PJD110_14.0.0.860(CN01)`.
+- No full download: `remotezip` + ChromeOS `CrAU` manifest + Range read of just
+  the `vendor_boot` REPLACE_XZ/REPLACE_BZ ops (13,533,166 bytes fetched, hash-
+  verified) via `/tmp/opencode/oplus/extract_vendor_boot.py`. C16 `vendor_boot`
+  is v4: `vendor_ramdisk_size 18522431`, `dtb_size 4018911`, `dtb_offset
+  18530304`, `dtb_addr 0x1f00000`. Extracted blobs under `/tmp/opencode/oplus/`
+  (NOT in git). C14 used only to cross-check the same GIC/IMEM/stride.
+
+### Real C16 Pineapple (SM8650) DTB facts (dtc 1.6.1 dump, `dtb2`/`dtb3`)
+- GIC `interrupt-controller@17100000` (`arm,gic-v3`): `reg=<0x17100000
+  0x10000 0x17180000 0x200000>`, `redistributor-stride=<0x0 0x40000>`.
+- `qcom,msm-imem@14680000` `reg=<0x14680000 0x1000>` (restart_reason@0x65c).
+- `arm,armv8-timer` PPIs 13/14/11/12, `clock-frequency=0x124f800` (19.2 MHz):
+  EL1 virtual timer = PPI 11 => **INTID 27** (sweet's odd 19 is SM7150-specific).
+- CPUs `@0..@700` MPIDR Aff1=core#; UFS `1d84000`; USB DWC3 `a600000`.
+- **The static vendor_boot DTB has NO framebuffer base.** `non_secure_display_region`
+  has only `compatible=shared-dma-pool`, `alloc-ranges`, `size=<0x0 0xa400000>`,
+  `alignment` and NO `reg`; `memory { reg=<0 0 0 0>; }` is filled by ABL into the
+  live FDT at boot. Consequence: the old README plan "read `cont_splash_base` reg
+  from the stock dtb" is impossible; the splash base only exists in ABL's live
+  FDT (x0). No touch/gpio-keys node found in the static DTB either.
+
+### Boot-critical bug found and fixed (`shim/fdt.c`)
+- Old `reg_entry()` guessed `#address-cells/#size-cells` from property *length*
+  (2+2 when len!=8). SM8650 `/soc` declares **1/1**, so the GIC's four 1-cell
+  values were misdecoded as one 64-bit pair -> `0x1710000000010000`. Host test
+  against the real C16 DTB caught it.
+- Fix: `reg_entry(val,len,ac,sc,...)` takes explicit cell sizes; `find_compat_reg()`
+  tracks `own_ac/own_sc` + `child_ac/child_sc` per depth (default 2/2), reading
+  `#address-cells`/`#size-cells` and handling compatible-before-reg order.
+  `fdt_fb_probe()` now decodes its splash `reg` with `/reserved-memory`'s own
+  cell sizes (2/2 default) and, under `DEVICE_WAFFLE` only, also matches
+  `display`/`framebuffer` node names. Sweet keeps the narrow match.
+- Host-verified (`gcc ... -DDEVICE_WAFFLE`, all four DTBs: C16 dtb2/dtb3, C14
+  dtb0, synthetic /tmp/test.dtb) => GIC reg0 `0x17100000/0x10000`, reg1
+  `0x17180000/0x200000`, IMEM `0x14680000/0x1000`, `-imem` suffix OK, synthetic
+  FB `0xfce00000/0x1200000` still OK. Sweet objects also compile with 0 ABS64.
+
+### Runtime FB + ADT design (this session)
+- `waffle-test.adt`: `sweet-fbcon/reg[0]=0` (unknown), geometry 1440x3168,
+  stride 5760, vtimer **27**. GIC `reg` reads `0x16100000` in ADT because it is
+  relative to `SOC_BASE=0x01000000` (arm-io `ranges`); +0x01000000 = `0x17100000`.
+- New `shim/adt.c/h`: `adt_set_fb()` patches only `sweet-fbcon/reg[0]` when it is
+  0 (waffle), leaving sweet's non-zero reg byte-identical. `loader_boot()` calls
+  it after copying the ADT, using `con_fb_phys` so early fbcon (`0003`) and
+  AppleCLCD (`0046`, `boot_args.Video.v_baseAddr`) agree.
+- `shim.c`: `loader_peek_fb()` gets geometry from payload v2; when `fb_base==0`
+  it calls `fdt_fb_probe()` on ABL's live FDT to discover the splash base, then
+  `con_set_fb()`; `DEVICE_WAFFLE` sets VTIMER/PTIMER 27/26. Host test:
+  waffle ADT patch `r=1` -> `0xfce00000`; sweet ADT `r=0`, `cmp` unchanged.
+
+### Rebuilt deliverable (exact results)
+- `tools/mkadt.py waffle-test.adt --device waffle` -> 9948 bytes. Sweet output
+  byte-identical to HEAD with a fixed seed (only the CLI's `os.urandom` random-
+  seed differs between runs; the sole waffle delta is vtimer 19->27).
+- `tools/mkpayload.py xnu/kernel.sweet waffle-test.adt shim/out/payload-waffle.bin
+  --fb-base 0 --fb-stride 5760 --fb-w 1440 --fb-h 3168 --fb-depth 32`:
+  payload v2, `fb_base 0` => runtime discovery, geometry 1440x3168x32 @5760.
+  (Replaces the stale `fb_base 0x9c000000` / `fb_stride 262144`.)
+- `DEVICE=waffle BOOTIMG_VER=4 shim/build.sh out/payload-waffle.bin` -> exit 0,
+  `out/Image` 184320 B, `out/shim-boot.img` 16,785,408 B. v4 header:
+  header_version 4, header_size 1584, kernel_size 184320, ramdisk_size
+  16,593,376 at 0x2e000; embedded payload v2 verified `fb_base 0`, stride 5760.
+- `package/shim-boot-waffle.img` sha256
+  `78ffd50d66b39339b56ff364655f29b2dcfc9618d3b89242e9e028541b0d0d31`;
+  `package/shim-image-waffle.bin` sha256
+  `93af85444c6a05c2fa9a2bc5d6e8108614960c3696309d24f9c6cd9ae5d22d52`.
+
+### Correction of stale claims in the 2026-11-06 handoff below
+- An aarch64 cross-compiler IS present; shim builds locally (it did this session).
+- The kernel IS built (`xnu/kernel.sweet`, 17,188,624 B, from CI run 42354678987).
+- The FB base cannot come from a static `cont_splash_base` reg; it is runtime-only.
+
+### Still blocked (need the real device)
+- No ABL live FDT => splash FB phys, real panel rowBytes, touch IC/IRQ, keys are
+  unconfirmed. First boot may show a blank console if ABL does not keep a splash
+  region; runtime discovery covers the case where it does.
+- No real-boot verification of any of this session's changes.
+- Web search MCP: `insufficient balance`; GitHub Actions runner/actions perms
+  frequently 403; CI is not a reliable validation path.
+
+---
+
 ## >>> WAFFLE PORT HANDOFF (2026-11-06, read this first) <<<
 
 **Goal: adapt ios-sweet to OnePlus 12 (SM8650, codename `waffle`, 16/12 GiB RAM).**

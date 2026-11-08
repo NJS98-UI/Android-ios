@@ -49,7 +49,9 @@ PROFILES = {
         gicr=0x17180000, gicr_size=0x200000, gicr_stride=0x40000,
         fb=0x0, fb_size=0x1200000, fb_w=1440, fb_h=3168, fb_stride=1440 * 4,
         ufs=0x01d84000, ufs_size=0x3000,  # ufshc@1d84000, same JEDEC host base
-        timebase=19200000, vtimer=19,     # QTI convention; verify from live DTB
+        # arm,armv8-timer PPIs 13/14/11/12 in the C16 PJD110 DTB: the EL1
+        # virtual timer is PPI 11 -> INTID 27 (sweet/SM7150 is the odd 19).
+        timebase=19200000, vtimer=27,
         # MPIDR Aff1 = core index (sm8650.dtsi): 0-1 A520, 2-6 A720, 7 X4.
         cores=[dict(mpidr=0x000, mhz=2265), dict(mpidr=0x100, mhz=2265),
                dict(mpidr=0x200, mhz=3149), dict(mpidr=0x300, mhz=3149),

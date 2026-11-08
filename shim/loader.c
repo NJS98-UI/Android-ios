@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "console.h"
 #include "fdt.h"
+#include "adt.h"
 #include "loader.h"
 
 #define BOOT_LINE_LENGTH	608
@@ -96,9 +97,8 @@ int loader_peek_fb(uintptr_t dtb, uint64_t *base, uint64_t *stride,
 	if (rd_start & 7)
 		return 0;
 	const struct payload *p = (const struct payload *)rd_start;
-	if (!magic_ok(p->magic) || p->version < 1 || p->version > 2)
-		return 0;
-	if (!p->fb_base)
+	/* v1 has no fb fields at all (they overlap the tail of its cmdline). */
+	if (!magic_ok(p->magic) || p->version != 2)
 		return 0;
 	*base = p->fb_base;
 	*stride = p->fb_stride;
@@ -144,6 +144,11 @@ const char *loader_boot(uintptr_t dtb)
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
 	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
 	copy64(adt_pa, rd_start + p->adt_off, p->adt_size);
+	/* mkadt.py emits waffle's sweet-fbcon/reg[0] = 0: ABL's live FDT is the
+	 * only source of the splash address. Give the kernel's early console the
+	 * same base we pass in boot_args.Video (con_fb_phys, set by shim_main). */
+	if (con_fb_phys)
+		adt_set_fb(adt_pa, con_fb_phys);
 	uintptr_t ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
 	uintptr_t top = ba_pa + PAGE_16K;
 

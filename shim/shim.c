@@ -31,8 +31,15 @@
 #define GICR_ISPENDR0		(GICR_SGI + 0x200)
 #define GICR_ISACTIVER0		(GICR_SGI + 0x300)
 #define GICR_ICFGR1		(GICR_SGI + 0xc04)
-#define VTIMER_INTID		19	/* DT: <GIC_PPI 3 ...>, not the usual 27 */
+#ifdef DEVICE_WAFFLE
+/* PJD110 C16 DTB: arm,armv8-timer PPIs 13/14/11/12 -> virt PPI 11 = INTID 27,
+ * phys PPI 10 is not listed; the diagnostics only ever arm the virtual one. */
+#define VTIMER_INTID		27
+#define PTIMER_INTID		26
+#else
+#define VTIMER_INTID		19	/* sweet DT: <GIC_PPI 3 ...>, not the usual 27 */
 #define PTIMER_INTID		18	/* DT: <GIC_PPI 2 ...> */
+#endif
 #define SGI_INTID		1
 
 #define PSCI_VERSION		0x84000000UL
@@ -393,10 +400,15 @@ void shim_main(uint64_t dtb)
 	{
 		uint64_t fb_base = 0, fb_stride = 0;
 		uint32_t fb_w = 0, fb_h = 0, fb_depth = 0;
-		if (loader_peek_fb(dtb, &fb_base, &fb_stride, &fb_w, &fb_h, &fb_depth))
-			con_set_fb(fb_base, fb_w, fb_h, fb_stride);
-		else if (fdt_fb_probe(dtb, &fphys, &fsize) && fsize >= 0x100000)
-			con_set_fb(fphys, con_fb_w, con_fb_h, con_fb_stride);
+		int have_geom = loader_peek_fb(dtb, &fb_base, &fb_stride,
+		                              &fb_w, &fb_h, &fb_depth);
+		if (!fb_base && fdt_fb_probe(dtb, &fphys, &fsize) && fsize >= 0x100000)
+			fb_base = fphys;	/* ABL's live splash region */
+		if (fb_base)
+			con_set_fb(fb_base,
+			           have_geom && fb_w ? fb_w : con_fb_w,
+			           have_geom && fb_h ? fb_h : con_fb_h,
+			           have_geom && fb_stride ? fb_stride : con_fb_stride);
 	}
 	if (fdt_compatible_reg(dtb, "arm,gic-v3", 0, &fphys, &fsize))
 		gicd_base = fphys;

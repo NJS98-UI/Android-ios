@@ -1,6 +1,86 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> UPDATE 2026-11-08 (read first; C16 firmware + rebuilt package) <<<
+## >>> UPDATE 2026-11-08 (read first; complete flashable package work) <<<
+
+**Active handoff: the boot image, root build pipeline and flash script are now
+in place; the full ios16-root.simg is still missing because this sandbox has
+20 GiB total, no /dev/kvm, no hfsplus.ko/fuse and no device. Everything below
+is a local observation, never a real-boot result.**
+
+### Complete package (user: "I only want the result", 2026-11-08)
+- `package/shim-boot-waffle.img` REBUILT with the root-mount cmdline
+  (`rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1
+  launchd_unsecure_cache=1 wdt=-1 ...`) and the 12,632 B waffle ADT carrying
+  real D22AP `/product` (63 props). sha256
+  `374cb7f26be0079c9091da2c31c8d851f6fd3c3b879cdb9dc221972c5d513ea4`;
+  16,785,408 B. Parsed locally: v4 header, kernel_size 184320 @0x1000,
+  ramdisk_size 16,596,064 @0x2e000, payload v2, fb 0/5760/1440x3168/32,
+  embedded ADT byte-identical to tracked `waffle-test.adt`. `shim-image-waffle.bin`
+  unchanged (93af8544...d52). Sweet ADT fixed-seed deterministic (12,588 B now
+  also with /product); waffle differs from fixed seed only in 64 random-seed bytes.
+- `waffle-test.adt` regenerated to 12,632 B (was 9,948): `tools/mkadt.py`
+  reads `research/ipsw-x/d22ap.adt`, extracted from `d22ap.im4p` (pyimg4 IM4P
+  `dtre`, decompressed 186,084 B) out of the iPhone10,3 16.7.16 (20H392) IPSW.
+  `research/` stays gitignored; Apple artifacts never enter git.
+- `package/flash-waffle.sh` (new): verifies one fastboot device, requires typing
+  `ERASE`, `fastboot -S 512M flash userdata ios16-root.simg`, then
+  `fastboot boot shim-boot-waffle.img`. Refuses to run without the root image.
+- `tools/build-ios-root.sh` (new): reproducible IPSW->`ios16-root.simg` pipeline
+  for hosts without hfsplus/fuse/KVM. `package/README.md` rewritten for the
+  two-artifact package. `NOTES`/README correct the old "boot.img alone is
+  complete" and "kernel at 0x8000 / ramdisk at 0x1000000" file-offset claims.
+
+### Apple IPSW source (all downloads finished this session)
+- ipsw.me v4 `iPhone10,3?type=ipsw`: iOS 16.7.16 `20H392`, 6,171,035,648 B.
+  `tools/remotezip.py` HTTP Range + CRC + resume fetched only: `OS.dmg`
+  (087-86698-044, 4,730,814,044 B), `SystemOS.dmg` (087-86593-047,
+  2,743,074,816 B), `AppOS.dmg` (087-86715-047, 10,485,760 B),
+  `BuildManifest.plist`, `d22ap.im4p`. Log `/tmp/opencode/download2.log`
+  `ALL DOWNLOADS COMPLETE`. The first background terminal hit its 1 h timeout
+  at 86%; resuming from `.part` finished cleanly.
+- 7zz can list APFS but cannot decode iOS decmpfs (`Unsupported method`);
+  libfsapfs fails on these trees (`invalid object type: 0x00000000`). Custom
+  `/tmp/opencode/apfs-fuse/apfs_extract.cpp` (apfs-fuse DecompressFile, pax
+  tar, uid/gid/mode/symlink) exported SystemOS fully: 634 dirs, 1459 files,
+  1280 decompressed, 0 errors, 3.2 GiB tar. AppOS: 163 dirs, 884 files,
+  697 decompressed, 0 errors.
+
+### Root injection pipeline (each primitive verified on this host)
+- `guestfish tar-in` over virtio-serial measured 0.44 MB/s (120 MiB in 272 s):
+  unusable for a 12 GiB root. Fix: attach the tar itself as a virtio-blk disk
+  (`guestfish -a hfs.img -a all.tar -a overlay.tar`), then inside the appliance
+  `tar -xf /dev/sdb -C /hfs` reads it locally. Small-sample end-to-end passed
+  twice, including `tar -A` concatenation, overlay overwrite, hard link
+  (`nlink=2`), uid/gid/mode, symlink, `mv`, `rm`, `fsck.hfsplus -y` repair and
+  `img2simg`.
+- Appliance needs `modprobe hfsplus` + short mount retry (intermittent
+  "wrong fs type" without it); it has GNU tar, chown, ln but NO python3, so
+  `sweet-root-tweaks.py` runs on the host against a small staging tree and is
+  packed into `overlay.tar`. A generated `post.sh` inside that tar runs in the
+  appliance to hard-link dyld shared caches/cryptex files (sources only exist
+  in HFS+ at that point) and move VirtualAudio.plugin; verified against the
+  real 3.2 GiB SystemOS tar (2,881 generated lines, `sh -n` OK).
+- `guestfish -i` and `upload` both fail here (no auto-mountable root fs); the
+  script uses `run` + `debug sh` heredoc only. supermin env:
+  `SUPERMIN_KERNEL=/boot/vmlinuz-6.1.0-54-amd64`,
+  `SUPERMIN_MODULES=/lib/modules/6.1.0-54-amd64`, `depmod 6.1.0-54-amd64`.
+
+### Why ios16-root.simg was not assembled here (observation, not a guess)
+- Host `/dev/root` is 20 GiB with ~1.6-3 GiB free after the 7.0 GiB IPSW +
+  3.2 GiB sysos.tar; a 16 GiB raw HFS+ + 12 GiB sparse image cannot coexist.
+  QEMU TCG appliance (no /dev/kvm) plus 4.5 GiB OS.dmg export would also take
+  hours. The full pipeline is committed as `tools/build-ios-root.sh` to run on
+  a host with ~40 GiB free. Run it, then `package/flash-waffle.sh`.
+
+### Still blocked (need the real device)
+- No ABL live FDT => splash FB phys, real panel rowBytes, touch IC/IRQ, keys
+  are unconfirmed. No real-boot verification of any of this session's changes.
+- Web search MCP: `insufficient balance`; GitHub Actions runner/actions perms
+  frequently 403; CI is not a reliable validation path.
+
+---
+
+## C16 firmware + earlier rebuilt boot image (2026-11-08, first session)
 
 **Observation (not a guess): a real PJD110 ColorOS 16 firmware was fetched and its
 `vendor_boot` DTB parsed; the shim package was rebuilt against it. No device was

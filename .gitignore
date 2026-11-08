@@ -4,6 +4,11 @@ dtb/
 recovery/
 # third-party/Apple sources fetched for reading
 research/
+# copyrighted Apple IPSW / root build intermediates and sparse root image
+package/ios16-root.simg
+*.dmg
+*.dmg.part
+ios16-root*.img
 shim/out/
 xnu/out/
 xnu/out-*/
